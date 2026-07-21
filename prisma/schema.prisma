@@ -5,3 +5,116 @@ generator client {
 datasource db {
   provider = "postgresql"
 }
+
+enum VehicleType {
+  MOTORCYCLE
+  CAR
+  BUS
+}
+
+enum ParkingSpotType {
+  MOTORCYCLE
+  COMPACT
+  LARGE
+}
+
+enum ParkingSpotStatus {
+  AVAILABLE
+  RESERVED
+  OCCUPIED
+  OUT_OF_SERVICE
+}
+
+enum ParkingSessionStatus {
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+model ParkingLot {
+  id          String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name        String
+  address     String?
+  description String?
+  timezone    String         @default("Asia/Kolkata")
+  isActive    Boolean        @default(true) @map("is_active")
+  createdAt   DateTime       @default(now()) @map("created_at")
+  updatedAt   DateTime       @default(now()) @updatedAt @map("updated_at")
+  floors      ParkingFloor[]
+
+  @@index([isActive], map: "parking_lots_is_active_idx")
+  @@map("parking_lots")
+}
+
+model ParkingFloor {
+  id           String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  parkingLotId String        @map("parking_lot_id") @db.Uuid
+  name         String
+  floorNumber  Int           @map("floor_number")
+  description  String?
+  sortOrder    Int           @default(0) @map("sort_order")
+  isActive     Boolean       @default(true) @map("is_active")
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime      @default(now()) @updatedAt @map("updated_at")
+  parkingLot   ParkingLot    @relation(fields: [parkingLotId], references: [id], onDelete: Cascade)
+  spots        ParkingSpot[]
+
+  @@unique([parkingLotId, floorNumber], map: "parking_floors_lot_floor_number_key")
+  @@unique([parkingLotId, name], map: "parking_floors_lot_name_key")
+  @@index([parkingLotId, isActive, sortOrder], map: "parking_floors_lot_active_sort_idx")
+  @@map("parking_floors")
+}
+
+model ParkingSpot {
+  id         String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  floorId    String            @map("floor_id") @db.Uuid
+  spotNumber String            @map("spot_number")
+  type       ParkingSpotType
+  status     ParkingSpotStatus @default(AVAILABLE)
+  isActive   Boolean           @default(true) @map("is_active")
+  priority   Int               @default(0)
+  createdAt  DateTime          @default(now()) @map("created_at")
+  updatedAt  DateTime          @default(now()) @updatedAt @map("updated_at")
+  floor      ParkingFloor      @relation(fields: [floorId], references: [id], onDelete: Cascade)
+  sessions   ParkingSession[]
+
+  @@unique([floorId, spotNumber], map: "parking_spots_floor_spot_number_key")
+  @@index([floorId, status, type, isActive, priority, spotNumber], map: "parking_spots_floor_availability_idx")
+  @@index([status, type, isActive, priority, spotNumber], map: "parking_spots_allocation_lookup_idx")
+  @@map("parking_spots")
+}
+
+model Vehicle {
+  id                 String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  registrationNumber String           @unique(map: "vehicles_registration_number_key") @map("registration_number")
+  vehicleType        VehicleType      @map("vehicle_type")
+  createdAt          DateTime         @default(now()) @map("created_at")
+  updatedAt          DateTime         @default(now()) @updatedAt @map("updated_at")
+  sessions           ParkingSession[]
+
+  @@index([vehicleType], map: "vehicles_vehicle_type_idx")
+  @@map("vehicles")
+}
+
+model ParkingSession {
+  id                 String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ticketNumber       String               @unique(map: "parking_sessions_ticket_number_key") @map("ticket_number")
+  vehicleId          String               @map("vehicle_id") @db.Uuid
+  parkingSpotId      String               @map("parking_spot_id") @db.Uuid
+  entryAt            DateTime             @map("entry_at")
+  exitAt             DateTime?            @map("exit_at")
+  status             ParkingSessionStatus @default(ACTIVE)
+  durationMinutes    Int?                 @map("duration_minutes")
+  totalFeeMinorUnits BigInt?              @map("total_fee_minor_units")
+  currency           String               @default("INR") @db.Char(3)
+  feeBreakdown       Json?                @map("fee_breakdown")
+  createdAt          DateTime             @default(now()) @map("created_at")
+  updatedAt          DateTime             @default(now()) @updatedAt @map("updated_at")
+  vehicle            Vehicle              @relation(fields: [vehicleId], references: [id], onDelete: Restrict)
+  parkingSpot        ParkingSpot          @relation(fields: [parkingSpotId], references: [id], onDelete: Restrict)
+
+  @@index([vehicleId, status], map: "parking_sessions_vehicle_status_idx")
+  @@index([parkingSpotId, status], map: "parking_sessions_spot_status_idx")
+  @@index([status, entryAt], map: "parking_sessions_status_entry_idx")
+  @@map("parking_sessions")
+}
