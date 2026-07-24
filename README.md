@@ -1,98 +1,324 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Smart Parking Lot Backend
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+Production-oriented NestJS backend for a multi-floor smart parking lot. The service manages parking lot administration, spot availability, vehicle check-in, vehicle checkout, deterministic spot allocation, fee calculation, and database consistency with PostgreSQL and Prisma.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## Stack
 
-## Description
+- NestJS 11
+- TypeScript
+- PostgreSQL
+- Prisma ORM
+- class-validator and class-transformer
+- Jest and Supertest
+- Swagger/OpenAPI
+- Docker Compose for local PostgreSQL
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+## Architecture
 
-## Project setup
+The app uses modular NestJS boundaries with thin controllers, service/use-case classes for application behavior, policy classes for domain rules, and Prisma repositories for persistence.
+
+Main modules:
+
+- `ParkingLotModule`: parking lot creation and lookup.
+- `ParkingFloorModule`: floor creation and listing within a lot.
+- `ParkingSpotModule`: spot creation, bulk creation, listing, and status changes.
+- `ParkingAllocationModule`: compatibility rules, deterministic ordering, and row-locking allocation.
+- `VehicleModule`: registration normalization and vehicle lookup/create behavior.
+- `ParkingSessionModule`: vehicle check-in and checkout use cases.
+- `FeeCalculationModule`: vehicle-specific pricing strategies and fee breakdowns.
+- `AvailabilityModule`: grouped availability queries.
+- `HealthModule`: application and database health checks.
+
+Shared infrastructure:
+
+- `PrismaModule` owns the Prisma client lifecycle.
+- `ConfigModule` validates required environment variables at startup.
+- Global validation pipe rejects unknown DTO properties.
+- Global exception filter returns structured error responses.
+
+## Database Model
+
+Prisma models:
+
+- `ParkingLot`
+- `ParkingFloor`
+- `ParkingSpot`
+- `Vehicle`
+- `ParkingSession`
+
+Key constraints and indexes:
+
+- Unique normalized vehicle registration number.
+- Unique parking ticket number.
+- Unique spot number within a floor.
+- Indexes for available spot lookup by status, type, floor, active flag, priority, and spot number.
+- Indexes for active session lookup by vehicle and spot.
+- Manual PostgreSQL partial unique indexes enforce one active session per vehicle and one active session per spot.
+
+Prisma cannot model PostgreSQL partial unique indexes directly, so they are included as custom SQL in the migration.
+
+## Allocation Strategy
+
+Spot compatibility rules:
+
+- Motorcycle: motorcycle, compact, then large.
+- Car: compact, then large.
+- Bus: large only.
+
+Allocation ordering:
+
+1. Preferred compatible spot type.
+2. Floor sort order.
+3. Spot priority.
+4. Spot number.
+5. Spot id.
+
+The allocation repository uses PostgreSQL `FOR UPDATE SKIP LOCKED` inside a transaction. It selects one available compatible spot, locks it, updates it to `RESERVED`, and returns it. The check-in transaction then creates the active session and marks the spot `OCCUPIED`.
+
+This prevents two concurrent check-ins from receiving the same spot. Partial unique indexes also protect against multiple active sessions for the same vehicle or spot.
+
+## Fee Calculation
+
+Fees are calculated with vehicle-specific strategies and integer minor units.
+
+Default INR rates:
+
+- Motorcycle: first hour `2000` paise, additional started hour `1000` paise.
+- Car: first hour `4000` paise, additional started hour `2000` paise.
+- Bus: first hour `10000` paise, additional started hour `5000` paise.
+
+Rules:
+
+- Minimum billable duration is one hour.
+- Partial hours round up to the next hour.
+- Persisted totals use `bigint` minor units.
+- Fee breakdown JSON stores money values as strings to avoid JSON bigint issues.
+
+## API
+
+All application APIs are under `/api/v1`, except `/health`.
+
+Health:
 
 ```bash
-$ npm install
+GET /health
 ```
 
-## Compile and run the project
+Parking lots and floors:
 
 ```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+POST /api/v1/parking-lots
+GET /api/v1/parking-lots
+GET /api/v1/parking-lots/:id
+POST /api/v1/parking-lots/:parkingLotId/floors
+GET /api/v1/parking-lots/:parkingLotId/floors
 ```
 
-## Run tests
+Parking spots:
 
 ```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
+POST /api/v1/parking-floors/:floorId/spots
+POST /api/v1/parking-floors/:floorId/spots/bulk
+GET /api/v1/parking-floors/:floorId/spots
+GET /api/v1/parking-spots?status=AVAILABLE&type=COMPACT
+PATCH /api/v1/parking-spots/:id/status
 ```
 
-## Deployment
-
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+Sessions:
 
 ```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+POST /api/v1/parking-sessions/check-in
+POST /api/v1/parking-sessions/check-out
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+Availability:
 
-## Resources
+```bash
+GET /api/v1/parking-lots/:parkingLotId/availability
+```
 
-Check out a few resources that may come in handy when working with NestJS:
+Swagger is available at `/docs` outside production.
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+## API Examples
 
-## Support
+Create a parking lot:
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+```bash
+curl -X POST http://localhost:3000/api/v1/parking-lots \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Central Smart Parking","timezone":"Asia/Kolkata"}'
+```
 
-## Stay in touch
+Create a floor:
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+```bash
+curl -X POST http://localhost:3000/api/v1/parking-lots/<parkingLotId>/floors \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Ground Floor","floorNumber":1,"sortOrder":1}'
+```
 
-## License
+Bulk create spots:
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+```bash
+curl -X POST http://localhost:3000/api/v1/parking-floors/<floorId>/spots/bulk \
+  -H "Content-Type: application/json" \
+  -d '{
+    "spots": [
+      {"spotNumber":"F1-M-01","type":"MOTORCYCLE","priority":1},
+      {"spotNumber":"F1-C-01","type":"COMPACT","priority":2},
+      {"spotNumber":"F1-L-01","type":"LARGE","priority":3}
+    ]
+  }'
+```
+
+Check in:
+
+```bash
+curl -X POST http://localhost:3000/api/v1/parking-sessions/check-in \
+  -H "Content-Type: application/json" \
+  -d '{"registrationNumber":"KA01AB1234","vehicleType":"CAR"}'
+```
+
+Check out:
+
+```bash
+curl -X POST http://localhost:3000/api/v1/parking-sessions/check-out \
+  -H "Content-Type: application/json" \
+  -d '{"ticketNumber":"PK-20260724-ABC123DEF0"}'
+```
+
+Or check out by registration number:
+
+```bash
+curl -X POST http://localhost:3000/api/v1/parking-sessions/check-out \
+  -H "Content-Type: application/json" \
+  -d '{"registrationNumber":"KA01AB1234"}'
+```
+
+## Error Response
+
+Errors are returned in a consistent shape:
+
+```json
+{
+  "statusCode": 409,
+  "code": "VEHICLE_ALREADY_CHECKED_IN",
+  "message": "The vehicle already has an active parking session",
+  "timestamp": "2026-07-24T10:00:00.000Z",
+  "path": "/api/v1/parking-sessions/check-in"
+}
+```
+
+## Local Setup
+
+Install dependencies:
+
+```bash
+npm.cmd install
+```
+
+Create local environment:
+
+```bash
+copy .env.example .env
+```
+
+Start PostgreSQL:
+
+```bash
+docker compose up -d
+```
+
+Generate Prisma client:
+
+```bash
+npm.cmd run prisma:generate
+```
+
+Apply migrations:
+
+```bash
+npm.cmd run prisma:migrate:dev
+```
+
+Seed data:
+
+```bash
+npm.cmd run prisma:seed
+```
+
+Start the app:
+
+```bash
+npm.cmd run start:dev
+```
+
+## Scripts
+
+```bash
+npm.cmd run format
+npm.cmd run lint
+npm.cmd test
+npm.cmd run test:e2e
+npm.cmd run build
+npm.cmd run prisma:generate
+npm.cmd run prisma:migrate:dev
+npm.cmd run prisma:migrate:deploy
+npm.cmd run prisma:seed
+npm.cmd run prisma:studio
+```
+
+Use `npm.cmd` on Windows PowerShell to avoid execution-policy issues with `npm.ps1`.
+
+## Testing
+
+Unit tests cover:
+
+- Registration normalization.
+- Spot compatibility.
+- Spot allocation ordering.
+- Spot status transitions.
+- Fee calculation and billable rounding.
+- Check-in service behavior.
+- Checkout service behavior.
+
+E2E tests cover:
+
+- Health checks.
+- Full parking workflow through HTTP APIs.
+- Concurrent check-in with a single compatible spot.
+- Concurrent duplicate checkout for the same ticket.
+
+E2E tests require a PostgreSQL database with migrations applied:
+
+```bash
+docker compose up -d
+npm.cmd run prisma:migrate:dev
+npm.cmd run test:e2e
+```
+
+## Production Notes
+
+- Run `npm.cmd run prisma:migrate:deploy` in deployment environments.
+- Set `NODE_ENV=production` to disable Swagger.
+- Do not trust client-provided timestamps, fees, durations, or spot assignments.
+- Keep administrative APIs behind authentication/authorization before exposing beyond local development.
+- Do not remove the partial unique indexes from migrations; they protect critical session invariants.
+
+## Known Limitations
+
+- Authentication and authorization are not implemented yet.
+- Rate limiting is not implemented yet.
+- E2E tests require a real PostgreSQL database and were not designed to run against mocked persistence.
+- Pricing is currently static and not stored in database rate cards.
+- WebSocket or server-sent availability updates are not implemented yet.
+
+## Future Improvements
+
+- Add authentication and role-based access for administrative endpoints.
+- Add rate cards and configurable pricing rules per parking lot.
+- Add daily maximums, peak-hour pricing, lost ticket charges, discounts, and memberships.
+- Add request correlation IDs across logs.
+- Add API endpoints for active-session lookup and ticket lookup.
+- Add WebSocket or SSE availability notifications.
+- Add CI that starts PostgreSQL and runs migrations, unit tests, e2e tests, lint, and build.
