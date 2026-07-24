@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { AvailabilityModule } from './availability/availability.module';
 import { validateEnvironment } from './config/env.validation';
+import { FeeCalculationModule } from './fee-calculation/fee-calculation.module';
 import { HealthModule } from './health/health.module';
 import { ParkingAllocationModule } from './parking-allocation/parking-allocation.module';
 import { ParkingFloorModule } from './parking-floor/parking-floor.module';
@@ -25,6 +26,7 @@ import { VehicleModule } from './vehicle/vehicle.module';
     ParkingAllocationModule,
     VehicleModule,
     ParkingSessionModule,
+    FeeCalculationModule,
     AvailabilityModule,
   ],
 })
