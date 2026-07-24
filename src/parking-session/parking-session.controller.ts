@@ -1,4 +1,4 @@
-import { Body, Controller, Post } from '@nestjs/common';
+import { Body, Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
 import {
   ApiConflictResponse,
   ApiCreatedResponse,
@@ -34,6 +34,7 @@ export class ParkingSessionController {
   }
 
   @Post('check-out')
+  @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Check out a vehicle and calculate parking fee' })
   @ApiOkResponse({ description: 'Vehicle checked out.' })
   @ApiNotFoundResponse({ description: 'Active parking session was not found.' })
