@@ -6,8 +6,10 @@ import { HealthModule } from './health/health.module';
 import { ParkingAllocationModule } from './parking-allocation/parking-allocation.module';
 import { ParkingFloorModule } from './parking-floor/parking-floor.module';
 import { ParkingLotModule } from './parking-lot/parking-lot.module';
+import { ParkingSessionModule } from './parking-session/parking-session.module';
 import { ParkingSpotModule } from './parking-spot/parking-spot.module';
 import { PrismaModule } from './prisma/prisma.module';
+import { VehicleModule } from './vehicle/vehicle.module';
 
 @Module({
   imports: [
@@ -21,6 +23,8 @@ import { PrismaModule } from './prisma/prisma.module';
     ParkingFloorModule,
     ParkingSpotModule,
     ParkingAllocationModule,
+    VehicleModule,
+    ParkingSessionModule,
     AvailabilityModule,
   ],
 })
