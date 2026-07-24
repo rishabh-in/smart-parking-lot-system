@@ -9,14 +9,18 @@ import { ApplicationError } from '../common/errors/application-error';
 import { ErrorCode } from '../common/errors/error-code';
 import { isPrismaErrorCode } from '../common/prisma/prisma-error.util';
 import { CLOCK, type Clock } from '../common/time/clock';
+import { FeeCalculationService } from '../fee-calculation/fee-calculation.service';
+import { FeeBreakdown } from '../fee-calculation/fee-calculation.types';
 import { ParkingAllocationService } from '../parking-allocation/parking-allocation.service';
 import { AllocatedParkingSpot } from '../parking-allocation/parking-allocation.types';
 import { PrismaService } from '../prisma/prisma.service';
 import { VehicleService } from '../vehicle/vehicle.service';
 import { CheckInParkingSessionDto } from './dto/check-in-parking-session.dto';
+import { CheckOutParkingSessionDto } from './dto/check-out-parking-session.dto';
 import { ParkingTicketNumberGenerator } from './parking-ticket-number.generator';
 import { PARKING_SESSION_REPOSITORY } from './parking-session.repository';
 import {
+  ActiveParkingSessionForCheckout,
   type ParkingSessionRepository,
   type ParkingSessionTransactionClient,
 } from './parking-session.repository';
@@ -39,6 +43,29 @@ export interface CheckInParkingSessionResponse {
   };
 }
 
+export interface CheckOutParkingSessionResponse {
+  ticketNumber: string;
+  registrationNumber: string;
+  vehicleType: string;
+  entryAt: Date;
+  exitAt: Date;
+  sessionStatus: ParkingSessionStatus;
+  durationMinutes: number;
+  totalFeeMinorUnits: string;
+  currency: string;
+  feeBreakdown: FeeBreakdown;
+  releasedSpot: {
+    id: string;
+    spotNumber: string;
+    type: string;
+    status: ParkingSpotStatus;
+    floorId: string;
+    floorName: string;
+    floorNumber: number;
+    parkingLotId: string;
+  };
+}
+
 @Injectable()
 export class ParkingSessionService {
   private readonly logger = new Logger(ParkingSessionService.name);
@@ -47,6 +74,7 @@ export class ParkingSessionService {
     private readonly prisma: PrismaService,
     private readonly vehicles: VehicleService,
     private readonly allocation: ParkingAllocationService,
+    private readonly fees: FeeCalculationService,
     private readonly ticketNumbers: ParkingTicketNumberGenerator,
     @Inject(CLOCK) private readonly clock: Clock,
     @Inject(PARKING_SESSION_REPOSITORY)
@@ -131,6 +159,85 @@ export class ParkingSessionService {
     );
   }
 
+  checkOut(
+    dto: CheckOutParkingSessionDto,
+  ): Promise<CheckOutParkingSessionResponse> {
+    const checkoutLookup = this.toCheckoutLookup(dto);
+
+    this.logger.log({
+      message: 'Checkout started',
+      ticketNumber: checkoutLookup.ticketNumber,
+      registrationNumber: checkoutLookup.registrationNumber,
+    });
+
+    return this.prisma.$transaction(
+      async (tx) => {
+        const activeSession = await this.parkingSessions.findActiveForCheckout(
+          checkoutLookup,
+          tx,
+        );
+
+        if (!activeSession) {
+          throw new ApplicationError(
+            ErrorCode.ACTIVE_PARKING_SESSION_NOT_FOUND,
+            'Active parking session was not found',
+            HttpStatus.NOT_FOUND,
+          );
+        }
+
+        const exitAt = this.clock.now();
+        const fee = this.fees.calculate({
+          vehicleType: activeSession.vehicleType,
+          entryAt: activeSession.entryAt,
+          exitAt,
+        });
+
+        this.logger.log({
+          message: 'Fee calculated',
+          ticketNumber: activeSession.ticketNumber,
+          durationMinutes: fee.durationMinutes,
+          totalFeeMinorUnits: fee.totalFeeMinorUnits.toString(),
+        });
+
+        const completedSession =
+          await this.parkingSessions.completeActiveSession(
+            {
+              id: activeSession.id,
+              exitAt,
+              durationMinutes: fee.durationMinutes,
+              totalFeeMinorUnits: fee.totalFeeMinorUnits,
+              currency: fee.currency,
+              feeBreakdown: fee.breakdown as unknown as Prisma.InputJsonValue,
+            },
+            tx,
+          );
+
+        if (!completedSession) {
+          throw new ApplicationError(
+            ErrorCode.PARKING_SESSION_ALREADY_COMPLETED,
+            'Parking session has already been completed',
+            HttpStatus.CONFLICT,
+          );
+        }
+
+        await this.parkingSessions.updateSpotStatus(
+          activeSession.parkingSpotId,
+          ParkingSpotStatus.AVAILABLE,
+          tx,
+        );
+
+        this.logger.log({
+          message: 'Checkout completed',
+          ticketNumber: completedSession.ticketNumber,
+          parkingSpotId: activeSession.parkingSpotId,
+        });
+
+        return this.toCheckOutResponse(activeSession, completedSession, fee);
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
+    );
+  }
+
   private async createActiveSession(
     data: {
       ticketNumber: string;
@@ -182,6 +289,71 @@ export class ParkingSessionService {
         floorName: allocatedSpot.floorName,
         floorNumber: allocatedSpot.floorNumber,
         parkingLotId: allocatedSpot.parkingLotId,
+      },
+    };
+  }
+
+  private toCheckoutLookup(dto: CheckOutParkingSessionDto): {
+    ticketNumber?: string;
+    registrationNumber?: string;
+  } {
+    const ticketNumber = dto.ticketNumber?.trim();
+    const registrationNumber = dto.registrationNumber
+      ? this.vehicles.normalizeRegistrationNumber(dto.registrationNumber)
+      : undefined;
+
+    if (
+      (!ticketNumber && !registrationNumber) ||
+      (ticketNumber && registrationNumber)
+    ) {
+      throw new ApplicationError(
+        ErrorCode.INVALID_CHECKOUT_REQUEST,
+        'Provide either ticket number or vehicle registration number',
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    return ticketNumber ? { ticketNumber } : { registrationNumber };
+  }
+
+  private toCheckOutResponse(
+    activeSession: ActiveParkingSessionForCheckout,
+    completedSession: ParkingSession,
+    fee: {
+      durationMinutes: number;
+      totalFeeMinorUnits: bigint;
+      currency: string;
+      breakdown: FeeBreakdown;
+    },
+  ): CheckOutParkingSessionResponse {
+    if (!completedSession.exitAt || completedSession.durationMinutes === null) {
+      throw new ApplicationError(
+        ErrorCode.PARKING_SESSION_CONFLICT,
+        'Completed parking session is missing checkout details',
+        HttpStatus.CONFLICT,
+      );
+    }
+
+    return {
+      ticketNumber: completedSession.ticketNumber,
+      registrationNumber: activeSession.registrationNumber,
+      vehicleType: activeSession.vehicleType,
+      entryAt: activeSession.entryAt,
+      exitAt: completedSession.exitAt,
+      sessionStatus: completedSession.status,
+      durationMinutes: completedSession.durationMinutes,
+      totalFeeMinorUnits: fee.totalFeeMinorUnits.toString(),
+      currency: fee.currency,
+      feeBreakdown: fee.breakdown,
+      releasedSpot: {
+        id: activeSession.parkingSpotId,
+        spotNumber: activeSession.parkingSpotNumber,
+        type: activeSession.parkingSpotType,
+        status: ParkingSpotStatus.AVAILABLE,
+        floorId: activeSession.floorId,
+        floorName: activeSession.floorName,
+        floorNumber: activeSession.floorNumber,
+        parkingLotId: activeSession.parkingLotId,
       },
     };
   }
